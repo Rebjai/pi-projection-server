@@ -1,0 +1,7 @@
+Flask
+Flask-SocketIO
+python-socketio
+python-engineio
+eventlet
+numpy
+opencv-python
