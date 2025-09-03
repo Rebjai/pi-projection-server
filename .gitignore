@@ -1,2 +1,4 @@
 /MAPAS/**
 /venv
+/uploads/**
+/configs/clients/*.json
