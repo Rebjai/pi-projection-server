@@ -61,25 +61,51 @@ def client_config_path(client_id: str) -> str:
     return os.path.join(CONFIG_CLIENTS, f"{safe}.json")
 
 def load_client_config(client_id: str) -> Dict[str, Any]:
+    print(f"[config] loading config for client {client_id}")
     path = client_config_path(client_id)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
+            print(f"[config] loaded config for client {client_id} from {path}")
             return json.load(f)
     # default config skeleton
-    return {
-        "client_id": client_id,
-        "grid_resolution": [1920, 1080],
-        "tile_indexes": [],            # ex: [0,1]
-        "hdmi_outputs": [],            # ex: [0,1]
-        "tile_coordinates": [],        # ex: [ [[x1,y1],[x2,y2]], ... ] per tile
-        "scale_mode": "fill",          # "fill" or "fit"
-        "homographies": {}             # "tile_index": [[..],...]
-    }
+    return None
+
+def load_or_create_client_config(client_id: str, default_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = load_client_config(client_id)
+    if cfg is None:
+        print(f"[config] creating new config for client {client_id} with defaults")
+        cfg = default_cfg
+        save_client_config(client_id, cfg)
+    else:
+        print(f"[config] existing config found for client {client_id}")
+    return cfg
 
 def save_client_config(client_id: str, cfg: Dict[str, Any]) -> None:
+    print(f"[config] saving config for client {client_id}: {cfg}")
     path = client_config_path(client_id)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+    # print(f"[config] saved config for client {client_id} to {path}")
+
+def checkConfigurationUpdates(existing_cfg: Dict[str, Any], new_cfg: Dict[str, Any]) -> bool:
+    """
+    Check for new fields in new_cfg that are not in existing_cfg.
+    If found, add them to existing_cfg and return True.
+    Otherwise check for changes in existing fields and update if different.
+    Return True if any updates were made, False otherwise.
+    """
+    print(f"[config] checking for updates in config...")
+    print(f"[config] checking for updates in config...")
+    print(f"[config] checking for updates in config...")
+    updated = False
+    for key in new_cfg:
+        if key not in existing_cfg and new_cfg[key] is not None:
+            existing_cfg[key] = new_cfg[key]
+            updated = True
+        elif key in existing_cfg and new_cfg[key] is not None and existing_cfg[key] != new_cfg[key]:
+            existing_cfg[key] = new_cfg[key]
+            updated = True
+    return updated
 
 # ---- Image scaling / slicing utilities ----
 def scale_image_to_grid(img: np.ndarray, grid_w: int, grid_h: int, mode: str = "fill") -> np.ndarray:
@@ -199,25 +225,46 @@ def compute_h_from_points(src_pts: List[List[float]], dst_pts: List[List[float]]
 # ---- SocketIO handlers ----
 @socketio.on('register')
 def handle_register(data):
+    print(f"[socket] register data: {data}")
     client_id = data.get('client_id')
-    meta = data.get('meta', {})
+    meta = data
     if not client_id:
         emit('registered', {'ok': False, 'error': 'missing client_id'})
         return
     connected_clients[client_id] = request.sid
     client_meta[client_id] = meta
+    #load config in file and saveConfig in file at CONFIG_CLIENTS updating if needed or creating new
+    configdata = meta
+    configdata['last_seen'] = int(time.time())
+    configdata['is_connected'] = True
+    cfg = load_or_create_client_config(client_id, configdata)
+        # update existing config with any new fields from meta
+    updated = checkConfigurationUpdates(cfg, configdata)
+    if updated:
+        print(f"[socket] updating config for client {client_id} with new meta fields")
+        save_client_config(client_id, configdata)
     print(f"[socket] client registered: {client_id} sid={request.sid} meta={meta}")
     emit('registered', {'ok': True, 'client_id': client_id})
 
 @socketio.on('disconnect')
 def handle_disconnect():
+    print(f"[socket] disconnect event, sid={request.sid}")
     sid = request.sid
     removed = []
-    for cid, csid in list(connected_clients.items()):
+    connected_clients_list = list(connected_clients.items())
+    print(f"[socket] currently connected clients: {connected_clients_list}")
+    for cid, csid in connected_clients_list:
         if csid == sid:
+            if cid in client_meta:
+                del client_meta[cid]
+                cfg = load_client_config(cid)
+                if cfg:
+                    cfg['last_seen'] = int(time.time())
+                    cfg['is_connected'] = False
+                    save_client_config(cid, cfg)
             del connected_clients[cid]
-            client_meta.pop(cid, None)
             removed.append(cid)
+            print(f"[socket] client disconnected: {cid} sid={sid}")
     if removed:
         print(f"[socket] disconnected clients removed: {removed}")
 
@@ -241,6 +288,7 @@ def upload_file():
 @app.route("/uploads", methods=["GET"])
 def list_uploads():
     files = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
+    print(f"[uploads] {len(files)} files")
     return jsonify({'uploads': files})
 
 @app.route("/uploads/<filename>", methods=["GET"])
@@ -269,6 +317,7 @@ def list_clients():
     """
     Return connected clients + known client configs on disk
     """
+    print(connected_clients)
     connected = list(connected_clients.keys())
     configs = []
     for cfg in os.listdir(CONFIG_CLIENTS):
@@ -447,5 +496,6 @@ def show():
 
 # ---- Main ----
 if __name__ == "__main__":
-    print("Starting server on 0.0.0.0:5000")
-    socketio.run(app, host="0.0.0.0", port=5000)
+    print("Starting server on 127.0.0.1:5000")
+    socketio.run(app, host="127.0.0.1", port=5000)
+    print("Server stopped")
