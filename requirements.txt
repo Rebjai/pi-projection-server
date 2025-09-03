@@ -6,3 +6,4 @@ python-engineio
 eventlet
 numpy
 opencv-python
+python-dotenv

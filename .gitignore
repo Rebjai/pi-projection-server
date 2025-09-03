@@ -2,3 +2,4 @@
 /venv
 /uploads/**
 /configs/clients/*.json
+.env

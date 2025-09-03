@@ -33,12 +33,14 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import cv2
 import numpy as np
+from dotenv import load_dotenv
 
 # ---- Configuración ----
+load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-TILES_ROOT = os.path.join(BASE_DIR, "tiles")
-CONFIG_CLIENTS = os.path.join(BASE_DIR, "configs", "clients")
+UPLOAD_FOLDER = os.path.join(BASE_DIR, os.getenv("UPLOAD_FOLDER", "uploads"))
+TILES_ROOT = os.path.join(BASE_DIR, os.getenv("TILES_ROOT", "tiles"))
+CONFIG_CLIENTS = os.path.join(BASE_DIR, os.getenv("CONFIG_CLIENTS", "configs/clients"))
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(TILES_ROOT, exist_ok=True)
@@ -319,11 +321,12 @@ def list_clients():
     """
     print(connected_clients)
     connected = list(connected_clients.keys())
-    configs = []
-    for cfg in os.listdir(CONFIG_CLIENTS):
-        cid = os.path.splitext(cfg)[0]
-        configs.append(cid)
-    return jsonify({'connected': connected, 'known_configs': configs})
+    connectedClientConfigs = []
+    for cid in connected:
+        cfg = load_client_config(cid)
+        connectedClientConfigs.append({'client_id': cid, 'config': cfg})
+
+    return jsonify({'connected': connectedClientConfigs})
 
 @app.route("/config/<client_id>", methods=["GET", "POST"])
 def config_client(client_id):
