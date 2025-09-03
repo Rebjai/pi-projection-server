@@ -243,6 +243,17 @@ def list_uploads():
     files = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
     return jsonify({'uploads': files})
 
+@app.route("/uploads/<filename>", methods=["GET"])
+def serve_upload(filename):
+    """
+    Serve uploaded files
+    """
+    safe_path = os.path.join(UPLOAD_FOLDER, filename)
+    if not os.path.exists(safe_path):
+        return abort(404)
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
+
 @app.route("/tiles/<image_basename>/<tile_file>", methods=["GET"])
 def serve_tile(image_basename, tile_file):
     """
