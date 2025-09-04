@@ -499,6 +499,8 @@ def show():
 
 # ---- Main ----
 if __name__ == "__main__":
-    print("Starting server on 127.0.0.1:5000")
-    socketio.run(app, host="127.0.0.1", port=5000)
+    SERVER_HOST = os.getenv("SERVER_HOST", "127.0.0.1")
+    SERVER_PORT = int(os.getenv("SERVER_PORT", "5000"))
+    print("Starting server on http://{}:{}".format(SERVER_HOST, SERVER_PORT))
+    socketio.run(app, host=SERVER_HOST, port=SERVER_PORT)
     print("Server stopped")
