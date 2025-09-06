@@ -3,3 +3,4 @@
 /uploads/**
 /configs/clients/*.json
 .env
+/tiles/**

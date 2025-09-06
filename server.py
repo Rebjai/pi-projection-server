@@ -148,66 +148,113 @@ def tile_output_name(image_basename: str, client_id: str, tile_index: int) -> st
     base = image_basename.replace(" ", "_")
     return f"client_{client_id}_tile_{tile_index}.png"
 
-def prepare_tiles_for_image(image_filename: str):
+def prepare_tiles_for_image(image_filename: str) -> None:
     """
     Generate tiles for a given image for all clients based on their configs.
-    Save tiles in tiles/<image_basename>/client_<client>_tile_<idx>.png
+    - Rectangles are defined in client canvas coordinates.
+    - Rectangles are scaled to the original image resolution.
+    - Tiles are saved in: tiles/<image_basename>/client_<client>_tile_<idx>.png
     """
     image_path = os.path.join(UPLOAD_FOLDER, image_filename)
     if not os.path.exists(image_path):
         raise FileNotFoundError(image_path)
 
-    # Load image with OpenCV (BGR)
-    img_bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
-    if img_bgr is None:
-        raise ValueError("Cannot read image: " + image_path)
+    # Load original image
+    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"Cannot read image: {image_path}")
 
-    # For each client config, create tile images based on that client's grid_resolution and tile coordinates
+    image_height, image_width = image.shape[:2]
+
+    # Process each client configuration
     for cfg_file in os.listdir(CONFIG_CLIENTS):
         client_id = os.path.splitext(cfg_file)[0]
-        cfg = load_client_config(client_id)
-        grid_res = cfg.get("grid_resolution", [1920, 1080])
-        grid_w, grid_h = int(grid_res[0]), int(grid_res[1])
-        scale_mode = cfg.get("scale_mode", "fill")
-        tile_coords = cfg.get("tile_coordinates", [])
-        tile_indexes = cfg.get("tile_indexes", [])
-        if not tile_coords or not tile_indexes:
-            # nothing to produce for this client
+        client_config = load_client_config(client_id)
+
+        process_client_config(
+            client_id,
+            client_config,
+            image,
+            image_filename,
+            (image_width, image_height),
+        )
+
+
+def process_client_config(
+    client_id: str,
+    config: Dict[str, Any],
+    image,
+    image_filename: str,
+    image_size: Tuple[int, int],
+) -> None:
+    """Process a single client configuration and generate image tiles."""
+    image_width, image_height = image_size
+
+    canvas_size = config.get("client_canvas_size", {"width": 1920, "height": 1080})
+    canvas_width = int(canvas_size.get("width", 1920))
+    canvas_height = int(canvas_size.get("height", 1080))
+
+    assignments = config.get("assignments", [])
+    if not assignments:
+        print(f"[slice] no assignments for client {client_id}, skipping")
+        return
+
+    # Ensure tiles directory exists
+    image_basename = os.path.splitext(os.path.basename(image_filename))[0]
+    tiles_dir = ensure_tile_dir(image_basename)
+
+    for idx, assignment in enumerate(assignments):
+        rect = assignment.get("rect", {})
+        tile = extract_tile_from_rect(
+            rect, image, (canvas_width, canvas_height), (image_width, image_height)
+        )
+
+        if tile is None:
+            print(f"[slice] invalid rect for client {client_id} assignment {idx}, skipping")
             continue
-        # scale image to grid
-        try:
-            scaled = scale_image_to_grid(img_bgr, grid_w, grid_h, scale_mode)
-        except Exception as e:
-            print(f"[tiler] error scaling for client {client_id}: {e}")
-            continue
-        # ensure output dir
-        image_basename = os.path.splitext(os.path.basename(image_filename))[0]
-        out_dir = ensure_tile_dir(image_basename)
-        # iterate assigned tiles (zip tile_indexes + coords)
-        if len(tile_indexes) != len(tile_coords):
-            print(f"[tiler] WARNING: client {client_id} tile_indexes length != tile_coords length. Skipping mismatched.")
-        pairs = list(zip(tile_indexes, tile_coords))
-        for (tidx, coord) in pairs:
-            try:
-                # coord expected [[x1,y1],[x2,y2]]
-                (x1y1, x2y2) = coord
-                x1, y1 = int(round(x1y1[0])), int(round(x1y1[1]))
-                x2, y2 = int(round(x2y2[0])), int(round(x2y2[1]))
-                # clip to grid
-                x1 = max(0, min(x1, grid_w - 1))
-                x2 = max(0, min(x2, grid_w))
-                y1 = max(0, min(y1, grid_h - 1))
-                y2 = max(0, min(y2, grid_h))
-                if x2 <= x1 or y2 <= y1:
-                    print(f"[tiler] invalid coords for client {client_id} tile {tidx}: {coord}")
-                    continue
-                roi = scaled[y1:y2, x1:x2]  # Note: y first in numpy
-                out_name = tile_output_name(image_basename, client_id, tidx)
-                out_path = os.path.join(out_dir, out_name)
-                cv2.imwrite(out_path, roi)
-                # optionally save small metadata maybe later
-            except Exception as e:
-                print(f"[tiler] error slicing tile {tidx} for client {client_id}: {e}")
+
+        save_tile(tile, tiles_dir, image_basename, client_id, idx)
+
+
+def extract_tile_from_rect(
+    rect: Dict[str, Any],
+    image,
+    canvas_size: Tuple[int, int],
+    image_size: Tuple[int, int],
+):
+    """Extract a tile from the image based on scaled rect coordinates."""
+    canvas_width, canvas_height = canvas_size
+    image_width, image_height = image_size
+
+    rect_x = float(rect.get("x", 0))
+    rect_y = float(rect.get("y", 0))
+    rect_w = float(rect.get("w", 0))
+    rect_h = float(rect.get("h", 0))
+
+    if rect_w <= 0 or rect_h <= 0:
+        return None
+
+    # Scale rect coordinates from canvas → image resolution
+    x = int(rect_x / canvas_width * image_width)
+    y = int(rect_y / canvas_height * image_height)
+    w = int(rect_w / canvas_width * image_width)
+    h = int(rect_h / canvas_height * image_height)
+
+    # Clip rect to image boundaries
+    x = max(0, min(x, image_width - 1))
+    y = max(0, min(y, image_height - 1))
+    w = max(1, min(w, image_width - x))
+    h = max(1, min(h, image_height - y))
+
+    return image[y:y + h, x:x + w]
+
+
+def save_tile(tile, tiles_dir: str, image_basename: str, client_id: str, idx: int) -> None:
+    """Save a tile to disk."""
+    tile_filename = tile_output_name(image_basename, client_id, idx)
+    tile_path = os.path.join(tiles_dir, tile_filename)
+    cv2.imwrite(tile_path, tile)
+    print(f"[slice] saved tile for client {client_id}, assignment {idx} -> {tile_path}")
 
 # ---- Homography utilities ----
 def compute_h_from_points(src_pts: List[List[float]], dst_pts: List[List[float]]) -> List[List[float]]:
