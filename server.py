@@ -409,33 +409,6 @@ def set_homography(client_id, tile_idx):
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
-@app.route("/slice_image", methods=["POST"])
-def slice_image():
-    """
-    POST JSON: {"image": "name.png"}
-    returns: job_id
-    """
-    data = request.get_json()
-    if not data or 'image' not in data:
-        return jsonify({'ok': False, 'error': 'image param required'}), 400
-    image = data['image']
-    image_path = os.path.join(UPLOAD_FOLDER, image)
-    if not os.path.exists(image_path):
-        return jsonify({'ok': False, 'error': 'image not found'}), 404
-
-    job_id = str(uuid.uuid4())
-    # spawn background task to avoid blocking
-    eventlet.spawn_n(_slice_image_job, image, job_id)
-    return jsonify({'ok': True, 'job_id': job_id})
-
-def _slice_image_job(image, job_id):
-    print(f"[job {job_id}] starting slicing for {image}")
-    try:
-        prepare_tiles_for_image(image)
-        print(f"[job {job_id}] finished slicing {image}")
-    except Exception as e:
-        print(f"[job {job_id}] ERROR slicing {image}: {e}")
-
 @app.route("/slice_all", methods=["POST"])
 def slice_all():
     """
