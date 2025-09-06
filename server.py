@@ -16,6 +16,8 @@ Funciones:
 - SocketIO 'ASSIGN_TILES' : enviado por server, cliente GETea tiles y los muestra
 - SocketIO 'SHOW'         : orden de mostrar sincronizado (frame_id)
 """
+import eventlet
+eventlet.monkey_patch()
 
 import os
 import io
@@ -23,8 +25,6 @@ import json
 import time
 import math
 import uuid
-import eventlet
-eventlet.monkey_patch()
 
 from typing import Tuple, List, Dict, Any
 
@@ -140,14 +140,14 @@ def scale_image_to_grid(img: np.ndarray, grid_w: int, grid_h: int, mode: str = "
         return canvas
 
 def ensure_tile_dir(image_basename: str) -> str:
-    safe = image_basename.replace(" ", "_")
-    path = os.path.join(TILES_ROOT, safe)
+    safe_image_basename = image_basename.replace(" ", "_")
+    path = os.path.join(TILES_ROOT, safe_image_basename)
     os.makedirs(path, exist_ok=True)
     return path
 
-def tile_output_name(image_basename: str, client_id: str, tile_index: int) -> str:
+def tile_output_name(image_basename: str, client_id: str, display_name: str) -> str:
     base = image_basename.replace(" ", "_")
-    return f"client_{client_id}_tile_{tile_index}.png"
+    return f"client_{client_id}_tile_{display_name}.png"
 
 def prepare_tiles_for_image(image_filename: str) -> None:
     """
@@ -172,7 +172,15 @@ def prepare_tiles_for_image(image_filename: str) -> None:
         client_id = os.path.splitext(cfg_file)[0]
         client_config = load_client_config(client_id)
 
-        process_client_config(
+        # process_client_config(
+        #     client_id,
+        #     client_config,
+        #     image,
+        #     image_filename,
+        #     (image_width, image_height),
+        # )
+        eventlet.spawn_n(
+            process_client_config,
             client_id,
             client_config,
             image,
@@ -206,15 +214,17 @@ def process_client_config(
 
     for idx, assignment in enumerate(assignments):
         rect = assignment.get("rect", {})
+        display_name = assignment.get("display_output", f"display_{idx}")
         tile = extract_tile_from_rect(
             rect, image, (canvas_width, canvas_height), (image_width, image_height)
         )
 
         if tile is None:
-            print(f"[slice] invalid rect for client {client_id} assignment {idx}, skipping")
+            print(f"[slice] invalid rect for client {client_id} assignment {display_name}, skipping")
             continue
 
-        save_tile(tile, tiles_dir, image_basename, client_id, idx)
+        # save_tile(tile, tiles_dir, image_basename, client_id, display_name)
+        eventlet.spawn_n(save_tile, tile, tiles_dir, image_basename, client_id, display_name)
 
 
 def extract_tile_from_rect(
@@ -250,12 +260,12 @@ def extract_tile_from_rect(
     return image[y:y + h, x:x + w]
 
 
-def save_tile(tile, tiles_dir: str, image_basename: str, client_id: str, idx: int) -> None:
+def save_tile(tile, tiles_dir: str, image_basename: str, client_id: str, display_name: str) -> None:
     """Save a tile to disk."""
-    tile_filename = tile_output_name(image_basename, client_id, idx)
+    tile_filename = tile_output_name(image_basename, client_id, display_name)
     tile_path = os.path.join(tiles_dir, tile_filename)
     cv2.imwrite(tile_path, tile)
-    print(f"[slice] saved tile for client {client_id}, assignment {idx} -> {tile_path}")
+    print(f"[slice] saved tile for client {client_id}, assignment {display_name} -> {tile_path}")
 
 # ---- Homography utilities ----
 def compute_h_from_points(src_pts: List[List[float]], dst_pts: List[List[float]]) -> List[List[float]]:
@@ -478,7 +488,8 @@ def _slice_all_job(files, job_id):
     print(f"[job {job_id}] slice_all start: {len(files)} files")
     for f in files:
         try:
-            prepare_tiles_for_image(f)
+            # prepare_tiles_for_image(f)
+            eventlet.spawn_n(prepare_tiles_for_image, f)
             print(f"[job {job_id}] sliced {f}")
         except Exception as e:
             print(f"[job {job_id}] error slicing {f}: {e}")
@@ -519,7 +530,7 @@ def distribute():
         tiles_payload = []
         for idx, tidx in enumerate(tile_indexes):
             # create filename and URL per convention
-            fname = tile_output_name(image_basename, client_id, tidx)
+            fname = tile_output_name(image_basename, client_id, display_name)
             local_path = os.path.join(tiles_dir, fname)
             if not os.path.exists(local_path):
                 print(f"[distribute] missing tile {local_path} for client {client_id}, tile {tidx}")
@@ -556,5 +567,6 @@ if __name__ == "__main__":
     SERVER_HOST = os.getenv("SERVER_HOST", "127.0.0.1")
     SERVER_PORT = int(os.getenv("SERVER_PORT", "5000"))
     print("Starting server on http://{}:{}".format(SERVER_HOST, SERVER_PORT))
-    socketio.run(app, host=SERVER_HOST, port=SERVER_PORT)
+    # socketio.run(app, host=SERVER_HOST, port=SERVER_PORT)
+    eventlet.wsgi.server(eventlet.listen((SERVER_HOST, SERVER_PORT)), app)
     print("Server stopped")
