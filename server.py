@@ -330,6 +330,16 @@ def list_clients():
 
 @app.route("/config/<client_id>", methods=["GET", "POST"])
 def config_client(client_id):
+    """
+    GET: return client config JSON
+    POST: update client config JSON (partial update)
+    Expected config fields:
+    - client_id: str
+    - displays: list of { "name":str, "resolution": {width:int, height:int}, "status": "connected"/"disconnected", "active": bool}
+    - assignments: list of { "display_name":str, rect: {x,y,width,height}
+    - grid_resolution: {width:int, height:int}
+    - scale_mode: "fill" or "fit"
+    """
     if request.method == "GET":
         cfg = load_client_config(client_id)
         return jsonify(cfg)
@@ -339,19 +349,35 @@ def config_client(client_id):
             return jsonify({'ok': False, 'error': 'no json body'}), 400
         # basic validation: ensure grid_resolution is two ints etc
         try:
-            # coerce certain fields
-            if 'grid_resolution' in data:
-                gr = data['grid_resolution']
-                data['grid_resolution'] = [int(gr[0]), int(gr[1])]
-            if 'tile_indexes' in data:
-                data['tile_indexes'] = [int(i) for i in data['tile_indexes']]
-            if 'hdmi_outputs' in data:
-                data['hdmi_outputs'] = [int(i) for i in data['hdmi_outputs']]
-            # tile_coords should be nested lists - keep as is
+            if 'client_id' in data and data['client_id'] != client_id:
+                raise ValueError("client_id in body must match URL")
+            if 'displays' in data:
+                displays = data['displays']
+                if not (isinstance(displays, list) and all(isinstance(d, dict) and 'name' in d and 'resolution' in d and isinstance(d['resolution'], dict) and 'width' in d['resolution'] and 'height' in d['resolution'] for d in displays)):
+                    raise ValueError("displays must be list of {name:str, resolution:{width:int,height:int}, status:str, active:bool}")
+            if 'client_canvas_size' in data:
+                gr = data['client_canvas_size']
+                if not (isinstance(gr, dict) and 'width' in gr and 'height' in gr and isinstance(gr['width'], int) and isinstance(gr['height'], int)):
+                    raise ValueError("client_canvas_size must be {width:int, height:int}")
+            if 'scale_mode' in data:
+                sm = data['scale_mode']
+                if sm not in ('fill', 'fit'):
+                    raise ValueError("scale_mode must be 'fill' or 'fit'")
+            if 'assignments' in data:
+                assignments = data['assignments']
+                if not (isinstance(assignments, list) and all(isinstance(a, dict) and 'display_output' in a and 'rect' in a for a in assignments)):
+                    raise ValueError("assignments must be list of {display_name:str, rect:{x:int,y:int,w:int,h:int}}")
+            
+
+            cfg = load_or_create_client_config(client_id, data)
+            updated = checkConfigurationUpdates(cfg, data)
+            if updated:
+                save_client_config(client_id, cfg)
+                return jsonify({'ok': True, 'updated': True, 'config': cfg})
+            else:
+                return jsonify({'ok': True, 'updated': False, 'config': cfg})
         except Exception as e:
-            return jsonify({'ok': False, 'error': f'validation error: {e}'}), 400
-        save_client_config(client_id, data)
-        return jsonify({'ok': True})
+            return jsonify({'ok': False, 'error': str(e)}), 400
 
 @app.route("/config/<client_id>/homography/<int:tile_idx>", methods=["POST"])
 def set_homography(client_id, tile_idx):
