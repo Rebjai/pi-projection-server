@@ -107,6 +107,7 @@ def checkConfigurationUpdates(existing_cfg: Dict[str, Any], new_cfg: Dict[str, A
         elif key in existing_cfg and new_cfg[key] is not None and existing_cfg[key] != new_cfg[key]:
             existing_cfg[key] = new_cfg[key]
             updated = True
+    print(f"[config] updates found: {updated}")
     return updated
 
 # ---- Image scaling / slicing utilities ----
@@ -418,10 +419,17 @@ def config_client(client_id):
 
             cfg = load_or_create_client_config(client_id, data)
             updated = checkConfigurationUpdates(cfg, data)
+            print(f"[config] config update for client {client_id}, updated={updated}")
             if updated:
                 save_client_config(client_id, cfg)
+                # if client connected, emit CONFIG event with new config
+                sid = connected_clients.get(client_id)
+                if sid:
+                    print(f"[config] emitting CONFIG event to client {client_id}")
+                    socketio.emit('CONFIG', cfg, room=sid)
                 return jsonify({'ok': True, 'updated': True, 'config': cfg})
             else:
+                print(f"[config] no changes in config for client {client_id}")
                 return jsonify({'ok': True, 'updated': False, 'config': cfg})
         except Exception as e:
             return jsonify({'ok': False, 'error': str(e)}), 400
