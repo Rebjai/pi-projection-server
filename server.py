@@ -172,21 +172,21 @@ def prepare_tiles_for_image(image_filename: str) -> None:
         client_id = os.path.splitext(cfg_file)[0]
         client_config = load_client_config(client_id)
 
-        # process_client_config(
-        #     client_id,
-        #     client_config,
-        #     image,
-        #     image_filename,
-        #     (image_width, image_height),
-        # )
-        eventlet.spawn_n(
-            process_client_config,
+        process_client_config(
             client_id,
             client_config,
             image,
             image_filename,
             (image_width, image_height),
         )
+        # eventlet.spawn_n(
+        #     process_client_config,
+        #     client_id,
+        #     client_config,
+        #     image,
+        #     image_filename,
+        #     (image_width, image_height),
+        # )
 
 
 def process_client_config(
@@ -223,8 +223,8 @@ def process_client_config(
             print(f"[slice] invalid rect for client {client_id} assignment {display_name}, skipping")
             continue
 
-        # save_tile(tile, tiles_dir, image_basename, client_id, display_name)
-        eventlet.spawn_n(save_tile, tile, tiles_dir, image_basename, client_id, display_name)
+        save_tile(tile, tiles_dir, image_basename, client_id, display_name)
+        # eventlet.spawn_n(save_tile, tile, tiles_dir, image_basename, client_id, display_name)
 
 
 def extract_tile_from_rect(
@@ -488,9 +488,11 @@ def _slice_all_job(files, job_id):
     print(f"[job {job_id}] slice_all start: {len(files)} files")
     for f in files:
         try:
-            # prepare_tiles_for_image(f)
-            eventlet.spawn_n(prepare_tiles_for_image, f)
+            prepare_tiles_for_image(f)
+            # eventlet.spawn_n(prepare_tiles_for_image, f)
             print(f"[job {job_id}] sliced {f}")
+            #send event to client to get slice
+            socketio.emit("FETCH_TILES", {"filename": f})
         except Exception as e:
             print(f"[job {job_id}] error slicing {f}: {e}")
     print(f"[job {job_id}] slice_all finished")
