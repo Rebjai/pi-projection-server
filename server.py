@@ -46,6 +46,19 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(TILES_ROOT, exist_ok=True)
 os.makedirs(CONFIG_CLIENTS, exist_ok=True)
 
+slideshow_running = False
+slideshow_paused = False
+slideshow_job = None
+current_index = 0
+resume_timer = None
+
+PRESENTATION_INTERVAL = 10  # seconds
+RESUME_TIMEOUT = 30        # seconds
+
+images_list = []  # set this when slicing is done
+clients_ready = set()  # clients that sent READY
+expected_clients = set()  # clients expected to join
+
 # Flask + SocketIO
 app = Flask(__name__)
 CORS(app)
@@ -282,6 +295,88 @@ def compute_h_from_points(src_pts: List[List[float]], dst_pts: List[List[float]]
         raise RuntimeError("findHomography failed")
     return H.tolist()
 
+# ---- presentation / slideshow utilities ----
+def start_presentation(files):
+    """start presentation variables and notify clients to wait for READY"""
+    global slideshow_running, images_list, current_index, slideshow_job, slideshow_paused, resume_timer
+    if slideshow_running:
+        print("[presentation] already running, ignoring start request")
+        return
+    if not files:
+        print("[presentation] no files provided, cannot start")
+        return
+    images_list = files
+    current_index = 0
+    slideshow_running = True
+    slideshow_paused = False
+
+    # notify clients
+    clients_ready.clear()
+    expected_clients.clear()
+    for cid in connected_clients.keys():
+        expected_clients.add(cid)
+    print(f"[presentation] expecting {len(expected_clients)} clients to join: {expected_clients}")
+    socketio.emit("START_PRESENTATION", {"files": files})
+    print(f"[presentation] started with {len(files)} images")
+    return
+    
+
+def stop_presentation():
+    """Stop presentation loop"""
+    global slideshow_running, slideshow_paused, slideshow_job, resume_timer
+    slideshow_running = False
+    slideshow_paused = False
+    if slideshow_job:
+        slideshow_job.kill()
+        slideshow_job = None
+    if resume_timer:
+        resume_timer.cancel()
+        resume_timer = None
+    return
+
+def slideshow_loop():
+    """Loop that emits SHOW_IMAGE events"""
+    global current_index, slideshow_running, slideshow_paused
+
+    while slideshow_running:
+        if not slideshow_paused and images_list:
+            image = images_list[current_index % len(images_list)]
+            print(f"[slideshow] showing {image}")
+            socketio.emit("SHOW_IMAGE", {"image": image})
+            current_index += 1
+
+        # wait interval
+        eventlet.sleep(PRESENTATION_INTERVAL)
+        # if paused, just wait without changing image
+        while slideshow_paused and slideshow_running:
+            eventlet.sleep(1)
+    print(f"[slideshow] loop exited")
+    return
+
+def manual_show(image):
+    """Manual override: show image and pause slideshow"""
+    global slideshow_paused, resume_timer
+
+    slideshow_paused = True
+    socketio.emit("SHOW_IMAGE", {"image": image})
+    print(f"[manual] override: {image}")
+
+    # cancel any existing resume timer
+    if resume_timer:
+        resume_timer.cancel()
+
+    # schedule resume
+    resume_timer = eventlet.spawn_after(RESUME_TIMEOUT, resume_presentation)
+
+
+def resume_presentation():
+    """Resume slideshow after manual override"""
+    global slideshow_paused
+    slideshow_paused = False
+    socketio.emit("RESUME_PRESENTATION", {})
+    print("[slideshow] resumed")
+    return
+
 # ---- SocketIO handlers ----
 @socketio.on('register')
 def handle_register(data):
@@ -497,72 +592,72 @@ def _slice_all_job(files, job_id):
             print(f"[job {job_id}] error slicing {f}: {e}")
     print(f"[job {job_id}] slice_all finished")
 
-@app.route("/distribute", methods=["POST"])
-def distribute():
-    """
-    POST JSON: {"image": "name.png"}  -> emit ASSIGN_TILES to connected clients
-    If image is not provided, use last uploaded or return error.
-    """
-    data = request.get_json() or {}
-    image = data.get('image')
-    if not image:
-        # choose latest upload
-        uploads = sorted([f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))],
-                         key=lambda x: os.path.getmtime(os.path.join(UPLOAD_FOLDER, x)), reverse=True)
-        if not uploads:
-            return jsonify({'ok': False, 'error': 'no uploads available'}), 400
-        image = uploads[0]
-    image_basename = os.path.splitext(os.path.basename(image))[0]
-    tiles_dir = os.path.join(TILES_ROOT, image_basename)
-    if not os.path.exists(tiles_dir):
-        return jsonify({'ok': False, 'error': 'tiles not generated for this image (run slice_image first)'}), 400
+# ---- Presentation control ----
+@app.route("/start_presentation", methods=["POST"])
+def api_start_presentation():
+    files = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
+    print(f"[presentation] starting with {len(files)} images")
+    if not files:
+        return {"ok": False, "error": "no images available"}
+    start_presentation(files)
+    return {"ok": True, "files": files}
 
-    # build and send per-client payloads
-    host = request.host_url.rstrip('/')
-    sent = []
-    failed = []
-    for cfg_file in os.listdir(CONFIG_CLIENTS):
-        client_id = os.path.splitext(cfg_file)[0]
-        cfg = load_client_config(client_id)
-        tile_indexes = cfg.get('tile_indexes', [])
-        hdmi_outputs = cfg.get('hdmi_outputs', [])
-        if len(tile_indexes) != len(hdmi_outputs):
-            # mismatch -> continue but warn
-            print(f"[distribute] WARNING mismatch tile_indexes vs hdmi_outputs for {client_id}")
-        tiles_payload = []
-        for idx, tidx in enumerate(tile_indexes):
-            # create filename and URL per convention
-            fname = tile_output_name(image_basename, client_id, display_name)
-            local_path = os.path.join(tiles_dir, fname)
-            if not os.path.exists(local_path):
-                print(f"[distribute] missing tile {local_path} for client {client_id}, tile {tidx}")
-                continue
-            url = f"{host}/tiles/{image_basename}/{fname}"
-            hdmi = hdmi_outputs[idx] if idx < len(hdmi_outputs) else 0
-            homos = cfg.get('homographies', {})
-            H = homos.get(str(tidx)) if homos else None
-            tiles_payload.append({'tile_index': tidx, 'url': url, 'hdmi_output': hdmi, 'homography': H})
-        # emit only if client connected
-        sid = connected_clients.get(client_id)
-        if sid:
-            payload = {'image': image, 'tiles': tiles_payload, 'frame_id': int(time.time())}
-            socketio.emit('ASSIGN_TILES', payload, room=sid)
-            sent.append(client_id)
-            print(f"[distribute] ASSIGN_TILES -> {client_id} (tiles: {len(tiles_payload)})")
-        else:
-            failed.append(client_id)
-            print(f"[distribute] client {client_id} not connected")
-    return jsonify({'ok': True, 'sent': sent, 'failed': failed})
 
-@app.route("/show", methods=["POST"])
-def show():
-    """
-    POST param frame_id optional: broadcast SHOW to all connected clients
-    """
-    frame_id = int(request.args.get('frame_id', time.time()))
-    for cid, sid in connected_clients.items():
-        socketio.emit('SHOW', {'frame_id': frame_id}, room=sid)
-    return jsonify({'ok': True, 'frame_id': frame_id, 'clients': list(connected_clients.keys())})
+@app.route("/manual_show/<image>", methods=["POST"])
+def api_manual_show(image):
+    manual_show(image)
+    return {"ok": True, "image": image}
+
+@app.route("/stop_presentation", methods=["POST"])
+def api_stop_presentation():
+    stop_presentation()
+    return {"ok": True}
+
+@app.route("/presentation/next", methods=["POST"])
+def api_next_image():
+    global current_index
+    if not images_list:
+        return {"ok": False, "error": "no images loaded"}, 400
+
+    # move forward
+    current_index = (current_index + 1) % len(images_list)
+    image = images_list[current_index]
+
+    manual_show(image)  # sends SHOW_IMAGE + pause slideshow
+    return {"ok": True, "image": image}
+
+@app.route("/presentation/prev", methods=["POST"])
+def api_prev_image():
+    global current_index
+    if not images_list:
+        return {"ok": False, "error": "no images loaded"}, 400
+
+    # move backward
+    current_index = (current_index - 1) % len(images_list)
+    image = images_list[current_index]
+
+    manual_show(image)  # sends SHOW_IMAGE + pause slideshow
+    return {"ok": True, "image": image}
+
+@socketio.on("PRESENTATION_READY")
+def on_presentation_ready(data):
+    cid = data.get("client_id")
+    if data.get("ready"):
+        clients_ready.add(cid)
+        print(f"[server] {cid} is ready")
+
+    if clients_ready == expected_clients:
+        print("[server] All clients ready -> starting slideshow")
+        slideshow_job = eventlet.spawn(slideshow_loop)
+    return
+
+
+@socketio.on("IMAGE_SHOWN")
+def on_image_shown(data):
+    cid = data.get("client_id")
+    image = data.get("image")
+    print(f"[server] Ack from {cid}: {image}")
+
 
 # ---- Main ----
 if __name__ == "__main__":
