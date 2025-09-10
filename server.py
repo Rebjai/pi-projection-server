@@ -355,7 +355,7 @@ def start_presentation(files):
     for cid in connected_clients.keys():
         expected_clients.add(cid)
     print(f"[presentation] expecting {len(expected_clients)} clients to join: {expected_clients}")
-    socketio.emit("START_PRESENTATION", {"files": files})
+    socketio.emit("START_PRESENTATION", {"images": files})
     print(f"[presentation] started with {len(files)} images")
     return
     
