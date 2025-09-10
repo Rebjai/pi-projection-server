@@ -123,6 +123,45 @@ def checkConfigurationUpdates(existing_cfg: Dict[str, Any], new_cfg: Dict[str, A
     print(f"[config] updates found: {updated}")
     return updated
 
+def handleClientConfigUpdate(client_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        if 'client_id' in data and data['client_id'] != client_id:
+            raise ValueError("client_id in body must match URL")
+        if 'displays' in data:
+            displays = data['displays']
+            if not (isinstance(displays, list) and all(isinstance(d, dict) and 'name' in d and 'resolution' in d and isinstance(d['resolution'], dict) and 'width' in d['resolution'] and 'height' in d['resolution'] for d in displays)):
+                raise ValueError("displays must be list of {name:str, resolution:{width:int,height:int}, status:str, active:bool}")
+        if 'client_canvas_size' in data:
+            gr = data['client_canvas_size']
+            if not (isinstance(gr, dict) and 'width' in gr and 'height' in gr and isinstance(gr['width'], int) and isinstance(gr['height'], int)):
+                raise ValueError("client_canvas_size must be {width:int, height:int}")
+        if 'scale_mode' in data:
+            sm = data['scale_mode']
+            if sm not in ('fill', 'fit'):
+                raise ValueError("scale_mode must be 'fill' or 'fit'")
+        if 'assignments' in data:
+            assignments = data['assignments']
+            if not (isinstance(assignments, list) and all(isinstance(a, dict) and 'display_output' in a and 'rect' in a for a in assignments)):
+                raise ValueError("assignments must be list of {display_name:str, rect:{x:int,y:int,w:int,h:int}}")
+        
+
+        cfg = load_or_create_client_config(client_id, data)
+        updated = checkConfigurationUpdates(cfg, data)
+        print(f"[config] config update for client {client_id}, updated={updated}")
+        if updated:
+            save_client_config(client_id, cfg)
+            # if client connected, emit CONFIG event with new config
+            sid = connected_clients.get(client_id)
+            if sid:
+                print(f"[config] emitting CONFIG event to client {client_id}")
+                socketio.emit('CONFIG', cfg, room=sid)
+            return jsonify({'ok': True, 'updated': True, 'config': cfg})
+        else:
+            print(f"[config] no changes in config for client {client_id}")
+            return jsonify({'ok': True, 'updated': False, 'config': cfg})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
 # ---- Image scaling / slicing utilities ----
 def scale_image_to_grid(img: np.ndarray, grid_w: int, grid_h: int, mode: str = "fill") -> np.ndarray:
     """
@@ -501,43 +540,38 @@ def config_client(client_id):
         if not data:
             return jsonify({'ok': False, 'error': 'no json body'}), 400
         # basic validation: ensure grid_resolution is two ints etc
-        try:
-            if 'client_id' in data and data['client_id'] != client_id:
-                raise ValueError("client_id in body must match URL")
-            if 'displays' in data:
-                displays = data['displays']
-                if not (isinstance(displays, list) and all(isinstance(d, dict) and 'name' in d and 'resolution' in d and isinstance(d['resolution'], dict) and 'width' in d['resolution'] and 'height' in d['resolution'] for d in displays)):
-                    raise ValueError("displays must be list of {name:str, resolution:{width:int,height:int}, status:str, active:bool}")
-            if 'client_canvas_size' in data:
-                gr = data['client_canvas_size']
-                if not (isinstance(gr, dict) and 'width' in gr and 'height' in gr and isinstance(gr['width'], int) and isinstance(gr['height'], int)):
-                    raise ValueError("client_canvas_size must be {width:int, height:int}")
-            if 'scale_mode' in data:
-                sm = data['scale_mode']
-                if sm not in ('fill', 'fit'):
-                    raise ValueError("scale_mode must be 'fill' or 'fit'")
-            if 'assignments' in data:
-                assignments = data['assignments']
-                if not (isinstance(assignments, list) and all(isinstance(a, dict) and 'display_output' in a and 'rect' in a for a in assignments)):
-                    raise ValueError("assignments must be list of {display_name:str, rect:{x:int,y:int,w:int,h:int}}")
-            
+        return handleClientConfigUpdate(client_id, data)
+    
+@app.route("/configs", methods=["GET", "POST"])
+def list_all_configs():
+    """
+    GET: list all client configs on disk
+    POST: bulk update multiple client configs
+    Body: {"configs": [ {client_id: str, ...}, ... ] }
+    """
+    if request.method == "GET":
+        configs = []
+        for cfg_file in os.listdir(CONFIG_CLIENTS):
+            client_id = os.path.splitext(cfg_file)[0]
+            cfg = load_client_config(client_id)
+            if cfg:
+                configs.append({'client_id': client_id, 'config': cfg})
+        return jsonify({'configs': configs})
+    else:
+        data = request.get_json()
+        if not data or 'configs' not in data:
+            return jsonify({'ok': False, 'error': 'no json body or missing configs field'}), 400
+        results = []
+        for cfg in data['configs']:
+            client_id = cfg.get('client_id')
+            if not client_id:
+                results.append({'ok': False, 'error': 'missing client_id in one of the configs'})
+                continue
+            print(f"[bulk config] updating config for client {client_id}")
+            res = handleClientConfigUpdate(client_id, cfg)
+            results.append(res.get_json())
+        return jsonify({'results': results})
 
-            cfg = load_or_create_client_config(client_id, data)
-            updated = checkConfigurationUpdates(cfg, data)
-            print(f"[config] config update for client {client_id}, updated={updated}")
-            if updated:
-                save_client_config(client_id, cfg)
-                # if client connected, emit CONFIG event with new config
-                sid = connected_clients.get(client_id)
-                if sid:
-                    print(f"[config] emitting CONFIG event to client {client_id}")
-                    socketio.emit('CONFIG', cfg, room=sid)
-                return jsonify({'ok': True, 'updated': True, 'config': cfg})
-            else:
-                print(f"[config] no changes in config for client {client_id}")
-                return jsonify({'ok': True, 'updated': False, 'config': cfg})
-        except Exception as e:
-            return jsonify({'ok': False, 'error': str(e)}), 400
 
 @app.route("/config/<client_id>/homography/<int:tile_idx>", methods=["POST"])
 def set_homography(client_id, tile_idx):
