@@ -672,6 +672,25 @@ def api_prev_image():
 
     manual_show(image)  # sends SHOW_IMAGE + pause slideshow
     return {"ok": True, "image": image}
+# enter calibration mode for client (client_id) and specific display (display_name)
+@app.route("/calibrate/<client_id>/<display_name>", methods=["POST"])
+def api_calibrate_display(client_id, display_name):
+    sid = connected_clients.get(client_id)
+    if not sid:
+        return {"ok": False, "error": f"client {client_id} not connected"}, 400
+    socketio.emit("CALIBRATE_DISPLAY", {"display_name": display_name}, room=sid)
+    return {"ok": True, "client_id": client_id, "display_name": display_name}
+
+#exit calibration mode for client (client_id) and specific display (display_name)
+@app.route("/calibrate/<client_id>/<display_name>/exit", methods=["POST"])
+def api_exit_calibrate_display(client_id, display_name):
+    sid = connected_clients.get(client_id)
+    if not sid:
+        return {"ok": False, "error": f"client {client_id} not connected"}, 400
+    socketio.emit("EXIT_CALIBRATE_DISPLAY", {"display_name": display_name}, room=sid)
+    return {"ok": True, "client_id": client_id, "display_name": display_name}
+
+# ---- SocketIO events for presentation sync ----
 
 @socketio.on("PRESENTATION_READY")
 def on_presentation_ready(data):
