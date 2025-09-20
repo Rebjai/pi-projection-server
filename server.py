@@ -8,13 +8,21 @@ Funciones:
 - /config/<client_id>     : GET/POST config JSON por cliente
 - /config/<client_id>/homography/<tile_idx> : POST para guardar/computar H
 - /slice_image            : POST filename -> genera tiles para esa imagen
-- /slice_all              : POST -> lanza slicing para todas las imágenes en uploads
-- /distribute             : POST {"image": "name.png"} -> emitir ASSIGN_TILES a clients conectados
+- /slice_all              : POST -> emite FETCH_TILES a clients conectados para que bajen las uploads y las sliceen
+- /start_presentation     : POST -> iniciar presentación (emite START_PRESENTATION a clients conectados)
+- /stop_presentation      : POST -> detener presentación
+- /manual_show/<image>    : POST -> mostrar imagen y pausar presentación
+- /presentation/next      : POST -> avanzar a siguiente imagen y pausar presentación
+- /presentation/prev      : POST -> retroceder a imagen anterior y pausar presentación
+- /calibrate/<client_id>/<display_name> : POST -> poner cliente en modo calibración para display
+- /calibrate/<client_id>/<display_name>/exit : POST -> salir de modo calibración
 - /tiles/<image>/<file>   : servir archivos de tiles (PNG)
 - /clients                : listar clientes conectados + configs
 - SocketIO 'register'     : clientes se registran (client_id, capabilities)
 - SocketIO 'ASSIGN_TILES' : enviado por server, cliente GETea tiles y los muestra
 - SocketIO 'SHOW'         : orden de mostrar sincronizado (frame_id)
+- SocketIO 'PRESENTATION_READY' : enviado por cliente cuando está listo para presentación
+- SocketIO 'IMAGE_SHOWN'  : ack de cliente cuando imagen fue mostrada
 """
 import eventlet
 eventlet.monkey_patch()
@@ -58,6 +66,10 @@ RESUME_TIMEOUT = 30        # seconds
 images_list = []  # set this when slicing is done
 clients_ready = set()  # clients that sent READY
 expected_clients = set()  # clients expected to join
+
+# State for the current slice_all run
+slice_event = None
+waiting_for = set()
 
 # Flask + SocketIO
 app = Flask(__name__)
@@ -200,124 +212,6 @@ def ensure_tile_dir(image_basename: str) -> str:
 def tile_output_name(image_basename: str, client_id: str, display_name: str) -> str:
     base = image_basename.replace(" ", "_")
     return f"client_{client_id}_tile_{display_name}.png"
-
-def prepare_tiles_for_image(image_filename: str) -> None:
-    """
-    Generate tiles for a given image for all clients based on their configs.
-    - Rectangles are defined in client canvas coordinates.
-    - Rectangles are scaled to the original image resolution.
-    - Tiles are saved in: tiles/<image_basename>/client_<client>_tile_<idx>.png
-    """
-    image_path = os.path.join(UPLOAD_FOLDER, image_filename)
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(image_path)
-
-    # Load original image
-    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
-    if image is None:
-        raise ValueError(f"Cannot read image: {image_path}")
-
-    image_height, image_width = image.shape[:2]
-
-    # Process each client configuration
-    for cfg_file in os.listdir(CONFIG_CLIENTS):
-        client_id = os.path.splitext(cfg_file)[0]
-        client_config = load_client_config(client_id)
-
-        process_client_config(
-            client_id,
-            client_config,
-            image,
-            image_filename,
-            (image_width, image_height),
-        )
-        # eventlet.spawn_n(
-        #     process_client_config,
-        #     client_id,
-        #     client_config,
-        #     image,
-        #     image_filename,
-        #     (image_width, image_height),
-        # )
-
-
-def process_client_config(
-    client_id: str,
-    config: Dict[str, Any],
-    image,
-    image_filename: str,
-    image_size: Tuple[int, int],
-) -> None:
-    """Process a single client configuration and generate image tiles."""
-    image_width, image_height = image_size
-
-    canvas_size = config.get("client_canvas_size", {"width": 1920, "height": 1080})
-    canvas_width = int(canvas_size.get("width", 1920))
-    canvas_height = int(canvas_size.get("height", 1080))
-
-    assignments = config.get("assignments", [])
-    if not assignments:
-        print(f"[slice] no assignments for client {client_id}, skipping")
-        return
-
-    # Ensure tiles directory exists
-    image_basename = os.path.splitext(os.path.basename(image_filename))[0]
-    tiles_dir = ensure_tile_dir(image_basename)
-
-    for idx, assignment in enumerate(assignments):
-        rect = assignment.get("rect", {})
-        display_name = assignment.get("display_output", f"display_{idx}")
-        tile = extract_tile_from_rect(
-            rect, image, (canvas_width, canvas_height), (image_width, image_height)
-        )
-
-        if tile is None:
-            print(f"[slice] invalid rect for client {client_id} assignment {display_name}, skipping")
-            continue
-
-        save_tile(tile, tiles_dir, image_basename, client_id, display_name)
-        # eventlet.spawn_n(save_tile, tile, tiles_dir, image_basename, client_id, display_name)
-
-
-def extract_tile_from_rect(
-    rect: Dict[str, Any],
-    image,
-    canvas_size: Tuple[int, int],
-    image_size: Tuple[int, int],
-):
-    """Extract a tile from the image based on scaled rect coordinates."""
-    canvas_width, canvas_height = canvas_size
-    image_width, image_height = image_size
-
-    rect_x = float(rect.get("x", 0))
-    rect_y = float(rect.get("y", 0))
-    rect_w = float(rect.get("w", 0))
-    rect_h = float(rect.get("h", 0))
-
-    if rect_w <= 0 or rect_h <= 0:
-        return None
-
-    # Scale rect coordinates from canvas → image resolution
-    x = int(rect_x / canvas_width * image_width)
-    y = int(rect_y / canvas_height * image_height)
-    w = int(rect_w / canvas_width * image_width)
-    h = int(rect_h / canvas_height * image_height)
-
-    # Clip rect to image boundaries
-    x = max(0, min(x, image_width - 1))
-    y = max(0, min(y, image_height - 1))
-    w = max(1, min(w, image_width - x))
-    h = max(1, min(h, image_height - y))
-
-    return image[y:y + h, x:x + w]
-
-
-def save_tile(tile, tiles_dir: str, image_basename: str, client_id: str, display_name: str) -> None:
-    """Save a tile to disk."""
-    tile_filename = tile_output_name(image_basename, client_id, display_name)
-    tile_path = os.path.join(tiles_dir, tile_filename)
-    cv2.imwrite(tile_path, tile)
-    print(f"[slice] saved tile for client {client_id}, assignment {display_name} -> {tile_path}")
 
 # ---- Homography utilities ----
 def compute_h_from_points(src_pts: List[List[float]], dst_pts: List[List[float]]) -> List[List[float]]:
@@ -605,26 +499,45 @@ def set_homography(client_id, tile_idx):
 
 @app.route("/slice_all", methods=["POST"])
 def slice_all():
-    """
-    Launch slicing for all images in uploads.
-    """
-    files = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
-    job_id = str(uuid.uuid4())
-    eventlet.spawn_n(_slice_all_job, files, job_id)
-    return jsonify({'ok': True, 'job_id': job_id, 'files_count': len(files)})
+    global slice_event, waiting_for
 
-def _slice_all_job(files, job_id):
-    print(f"[job {job_id}] slice_all start: {len(files)} files")
-    for f in files:
-        try:
-            prepare_tiles_for_image(f)
-            # eventlet.spawn_n(prepare_tiles_for_image, f)
-            print(f"[job {job_id}] sliced {f}")
-            #send event to client to get slice
-            socketio.emit("FETCH_TILES", {"filename": f})
-        except Exception as e:
-            print(f"[job {job_id}] error slicing {f}: {e}")
-    print(f"[job {job_id}] slice_all finished")
+    files = [
+        f for f in os.listdir(UPLOAD_FOLDER)
+        if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))
+    ]
+
+    # Create a new event + snapshot clients
+    slice_event = eventlet.event.Event()
+    waiting_for = set(connected_clients.keys())
+
+    print(f"[slice_all] expecting {len(waiting_for)} clients: {waiting_for}")
+
+    # Tell all clients to start
+    socketio.emit("FETCH_ALL_IMAGES", {"images": files})
+
+    try:
+        # Wait until all clients respond (with timeout)
+        slice_event.wait(timeout=60)
+    except eventlet.timeout.Timeout:
+        missing = list(waiting_for)
+        return jsonify({"ok": False, "error": "timeout", "waiting_for": missing}), 504
+
+    return jsonify({"ok": True, "files_count": len(files)})
+
+@socketio.on("ALL_TILES_READY")
+def handle_all_tiles_ready(data):
+    client_id = data.get("client_id")
+    global slice_event, waiting_for
+
+    if slice_event and client_id in waiting_for:
+        waiting_for.discard(client_id)
+        print(f"[socket] {client_id} is ready, still waiting for: {waiting_for}")
+
+        if not waiting_for:
+            slice_event.send("done")  # resolve the event
+            slice_event = None
+            print("[socket] all clients sliced tiles")
+    return 
 
 # ---- Presentation control ----
 @app.route("/start_presentation", methods=["POST"])
