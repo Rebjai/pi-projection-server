@@ -288,18 +288,19 @@ def slideshow_loop():
 
 def manual_show(image):
     """Manual override: show image and pause slideshow"""
-    global slideshow_paused, resume_timer
+    global slideshow_paused, resume_timer, slideshow_running
 
     slideshow_paused = True
     socketio.emit("SHOW_IMAGE", {"image": image})
     print(f"[manual] override: {image}")
 
     # cancel any existing resume timer
-    if resume_timer:
+    if slideshow_running and resume_timer:
         resume_timer.cancel()
 
     # schedule resume
-    resume_timer = eventlet.spawn_after(RESUME_TIMEOUT, resume_presentation)
+    if slideshow_running:
+        resume_timer = eventlet.spawn_after(RESUME_TIMEOUT, resume_presentation)
 
 
 def resume_presentation():
